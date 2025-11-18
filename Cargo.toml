@@ -1,0 +1,9 @@
+[package]
+name = "SpaceTravel"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+raylib = "5.5.1"
+glam = "0.27"
+png = "0.17"
