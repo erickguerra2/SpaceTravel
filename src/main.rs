@@ -95,7 +95,12 @@ fn main() {
     cam.update_pos_from_orbit();
 
     let mut prev_warp_active = false;
+    let mut frame_count: u64 = 0;
     while !rl.window_should_close() {
+        frame_count += 1;
+        if frame_count % 60 == 0 {
+            eprintln!("frame {}", frame_count);
+        }
         let dt = rl.get_frame_time();
 
         // Actualizar controles (mueve la nave y actualiza la cámara en 3ª persona)
@@ -165,6 +170,7 @@ fn main() {
         }
 
         // LIMPIAR Y RENDERIZAR
+        renderer.time = rl.get_time() as f32;
         renderer.clear(Color::BLACK);
 
         // Skybox
@@ -199,6 +205,7 @@ fn main() {
                 _ => {}
             }
         }
+        eprintln!("frame {}: after planets", frame_count);
 
         // (Temporal) Desactivado: halo solar para depuración del crash.
         // if let Some(sun) = planets.get(0) {
@@ -219,6 +226,7 @@ fn main() {
             PlanetShaderKind::Ice,
             light_dir,
         );
+        eprintln!("frame {}: after moon", frame_count);
 
         // Dibujar la nave en `ship_pos`. Rotamos 180deg para corregir orientación del modelo.
         renderer.draw_mesh_shaded_rot(
@@ -231,12 +239,15 @@ fn main() {
             PlanetShaderKind::Default,
             light_dir,
         );
+        eprintln!("frame {}: after ship", frame_count);
 
         // Presentar framebuffer a pantalla completa
         {
+            eprintln!("frame {}: before begin_drawing", frame_count);
             let mut d = rl.begin_drawing(&thread);
             d.clear_background(Color::BLACK);
             renderer.blit_to(&mut d);
+            eprintln!("frame {}: after blit_to", frame_count);
 
             // Draw orbital trails (project recent world positions to screen and draw native lines)
             for p in &planets {
@@ -256,8 +267,9 @@ fn main() {
                 }
             }
 
-            // Sun glow (additive) - keep after planet rasterization so it blends
+            // Sun fill + glow (additive) - keep after planet rasterization so it blends
             if let Some(sun) = planets.get(0) {
+                // draw the halo/glow (keep only glow for now to avoid recent crash)
                 renderer.draw_sun_glow(sun.position(), sun.scale, &cam);
             }
 

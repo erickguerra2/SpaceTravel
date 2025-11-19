@@ -25,6 +25,8 @@ pub struct SoftwareRenderer {
     pub color: Vec<u8>,
     /// Z-buffer (depth); valores pequeños = cerca
     depth: Vec<f32>,
+    /// Time for shader animations (in seconds)
+    pub time: f32,
 }
 
 impl SoftwareRenderer {
@@ -35,6 +37,7 @@ impl SoftwareRenderer {
             height,
             color: vec![0; size * 4],
             depth: vec![1.0; size],
+            time: 0.0,
         }
     }
 
@@ -56,7 +59,8 @@ impl SoftwareRenderer {
         }
         let idx = (y * self.width + x) as usize;
 
-        if z < self.depth[idx] {
+        // Accept equal depths as valid to reduce thin gaps between adjacent triangles
+        if z <= self.depth[idx] {
             self.depth[idx] = z;
             let base = idx * 4;
             self.color[base] = rgba[0];
@@ -234,6 +238,48 @@ impl SoftwareRenderer {
         shader: PlanetShaderKind,
         light_dir: Vec3,
     ) {
+        // Fast path: render Sun as a filled additive disk to avoid triangle seams
+        if matches!(shader, PlanetShaderKind::Sun) {
+            if let Some(screen) = self.project_point(pos, cam) {
+                let probe = pos + Vec3::new(scale, 0.0, 0.0);
+                let screen_radius = if let Some(p2) = self.project_point(probe, cam) {
+                    ((p2 - screen).length()).max(8.0)
+                } else {
+                    (scale * 10.0).min((self.width as f32) * 0.5)
+                };
+
+                // Cap radius to avoid huge loops when camera is extremely close
+                let max_rad = (self.width.max(self.height) as f32 * 1.5).min(2000.0);
+                let screen_radius = screen_radius.min(max_rad);
+                eprintln!("Sun fast-path screen_radius={}", screen_radius);
+                let int_rad = screen_radius.ceil() as i32;
+                let cx = screen.x.round() as i32;
+                let cy = screen.y.round() as i32;
+
+                for oy in -int_rad..=int_rad {
+                    let y = cy + oy;
+                    if y < 0 || y >= self.height { continue; }
+                    for ox in -int_rad..=int_rad {
+                        let x = cx + ox;
+                        if x < 0 || x >= self.width { continue; }
+                        let dist = ((ox * ox + oy * oy) as f32).sqrt();
+                        if dist > screen_radius { continue; }
+                        // pattern: use angle+radial bands to occasionally use slightly darker yellow
+                        let angle = (oy as f32).atan2(ox as f32);
+                        let band = ((angle * 10.0).floor() as i32 + (dist * 0.08) as i32) % 7;
+                        let add = if band == 0 {
+                            // darker patch (add less intensity)
+                            [120u8, 100u8, 40u8, 120u8]
+                        } else {
+                            // base yellow additive
+                            [200u8, 180u8, 80u8, 140u8]
+                        };
+                        self.add_blend_pixel(x, y, add);
+                    }
+                }
+            }
+            return;
+        }
         let model = Mat4::from_scale_rotation_translation(
             Vec3::splat(scale),
             Quat::IDENTITY,
@@ -369,8 +415,11 @@ impl SoftwareRenderer {
                 let w_b = edge_function(v2, v0, p);
                 let w_c = edge_function(v0, v1, p);
 
-                if (w_a >= 0.0 && w_b >= 0.0 && w_c >= 0.0) ||
-                   (w_a <= 0.0 && w_b <= 0.0 && w_c <= 0.0) {
+                    // Use a slightly larger epsilon to avoid thin black seams caused by
+                    // floating point rounding when adjacent triangles share edges.
+                    // We accept small negative values so shared edges are filled consistently.
+                    let eps = -1e-2;
+                     if w_a >= eps && w_b >= eps && w_c >= eps {
 
                     let w0n = w_a / area;
                     let w1n = w_b / area;
@@ -382,7 +431,7 @@ impl SoftwareRenderer {
 
                     let lambert = 0.0_f32.max(normal.dot(-light_dir));
 
-                    let rgba = shade_planet(shader, base_color, world_pos, lambert);
+                    let rgba = shade_planet(shader, base_color, world_pos, lambert, self.time);
                     self.put_pixel(x, y, z, rgba);
                 }
             }
@@ -445,6 +494,45 @@ impl SoftwareRenderer {
             }
         }
     }
+
+    /// Fill the sun core with a soft additive yellow to mask triangle seams.
+    /// Uses additive blending so it won't respect depth; draw this after planet rasterization.
+    pub fn fill_sun_core(&mut self, center: Vec3, scale: f32, cam: &Camera) {
+        if let Some(screen) = self.project_point(center, cam) {
+            let probe = center + Vec3::new(scale, 0.0, 0.0);
+            let screen_radius = if let Some(p2) = self.project_point(probe, cam) {
+                ((p2 - screen).length()).max(8.0)
+            } else {
+                (scale * 10.0).min((self.width as f32) * 0.5)
+            };
+
+            let int_rad = (screen_radius * 0.9).ceil() as i32; // slightly smaller than full glow
+            let fill_col = [200u8, 180u8, 80u8, 80u8];
+            let cx = screen.x.round() as i32;
+            let cy = screen.y.round() as i32;
+
+            for oy in -int_rad..=int_rad {
+                let y = cy + oy;
+                if y < 0 || y >= self.height { continue; }
+                for ox in -int_rad..=int_rad {
+                    let x = cx + ox;
+                    if x < 0 || x >= self.width { continue; }
+                    let dist = ((ox * ox + oy * oy) as f32).sqrt();
+                    if dist > screen_radius * 0.9 { continue; }
+                    // stronger at center, weaker toward edge
+                    let fall = 1.0 - (dist / (screen_radius * 0.9));
+                    let fall = fall.powf(1.2);
+                    let add = [
+                        (fill_col[0] as f32 * fall) as u8,
+                        (fill_col[1] as f32 * fall) as u8,
+                        (fill_col[2] as f32 * fall) as u8,
+                        (fill_col[3] as f32 * fall) as u8,
+                    ];
+                    self.add_blend_pixel(x, y, add);
+                }
+            }
+        }
+    }
 }
 
 fn shade_planet(
@@ -452,6 +540,7 @@ fn shade_planet(
     base: Color,
     world_pos: Vec3,
     lambert: f32,
+    time: f32,
 ) -> [u8; 4] {
     let mut r = base.r as f32 / 255.0;
     let mut g = base.g as f32 / 255.0;
@@ -459,15 +548,36 @@ fn shade_planet(
 
     match shader {
         PlanetShaderKind::Sun => {
+            // Simpler, solid yellow with small patch variation per-surface-grid
             let d = world_pos.length();
             let t = (d / 3.5).min(1.0);
-            r = lerp(1.0, 1.0, 1.0 - t);
-            g = lerp(0.9, 0.6, t);
-            b = lerp(0.3, 0.0, t);
-            let glow = 0.5 + 0.5 * lambert;
-            r *= glow;
-            g *= glow;
-            b *= glow;
+
+            // gentle flicker based on time
+            let flicker = (time * 2.0).sin() * 0.08 + (time * 4.3).cos() * 0.04;
+
+            // grid-based patch id to tint some triangles / patches differently
+            let grid = (world_pos * 20.0).floor();
+            let gx = grid.x as i32;
+            let gy = grid.y as i32;
+            let gz = grid.z as i32;
+            let patch_id = gx.wrapping_add(gy).wrapping_add(gz);
+            let is_patch = (patch_id.abs() % 7) == 0;
+
+            let base_bright = Vec3::new(1.0, 1.0, 0.5); // main yellow
+            let base_dark = Vec3::new(0.95, 0.92, 0.42); // slightly darker yellow for patches
+
+            let base_col = if is_patch { base_dark } else { base_bright };
+
+            // slight radial pale at edges
+            let edge_a = Vec3::new(1.0, 0.98, 0.55);
+            let col = base_col * (1.0 - t) + edge_a * t;
+
+            let limb_dark = 1.0 - t * t * 0.25;
+            let brightness = (0.8 + 0.2 * lambert) * limb_dark * (1.0 + flicker);
+
+            r = col.x * brightness;
+            g = col.y * brightness;
+            b = col.z * brightness;
         }
         PlanetShaderKind::Earth => {
             let lat = world_pos.y;
